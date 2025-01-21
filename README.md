@@ -7,7 +7,33 @@ Recent advancements in multi-person motion prediction have significantly improve
 
 
 ## Prepare Data
-
+```
+your_project_folder/
+├── Data/
+│   ├── mix
+│   │   ├── mix1_6persons.npy
+│   │   ├── mix2_6persons.npy
+│   ├── mocap
+│   │   ├── test_3_75_mocap.npy
+│   │   ├── train_3_75_mocap.npy
+│   ├── mupots3d
+│   │   ├── mupots_2_150_mocap.npy
+│   │   ├── mupots_2_150_mocap.npy
+│   ├── ...
+├── Model
+│   ├── Conv_Block.py
+│   ├── GCN.py
+│   ├── Layers.py
+│   ├── Models.py
+│   ├── Modules.py
+│   ├── SubLayers.py
+│   ├── MPE.py
+│   ├── ...
+├── data_short
+├── metrics.py
+├── Train_IME.py
+├── Test_IME.py
+```
 
 
 ## Requirements
