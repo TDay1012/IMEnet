@@ -1,0 +1,331 @@
+''' Define the Transformer model '''
+import torch
+import torch.nn as nn
+import numpy as np
+from IMEnet.IMEnet.Layers import EncoderLayer, DecoderLayer, CrassLayer
+from IMEnet.IMEnet.TimesNet import TimesNet
+
+from IMEnet.IMEnet.GCN import GCN_Block
+
+
+def get_pad_mask(seq, pad_idx):
+    return (seq != pad_idx).unsqueeze(-2)
+
+
+def get_subsequent_mask(seq):
+    ''' For masking out the subsequent info. '''
+    sz_b, len_s, *_ = seq.size()
+    subsequent_mask = (1 - torch.triu(
+        torch.ones((1, len_s, len_s), device=seq.device), diagonal=1)).bool()
+    return subsequent_mask
+
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_hid, n_position=200):
+        super(PositionalEncoding, self).__init__()
+
+        # Not a parameter
+        self.register_buffer('pos_table', self._get_sinusoid_encoding_table(n_position, d_hid))
+        self.register_buffer('pos_table2', self._get_sinusoid_encoding_table(n_position, d_hid))
+        # self.register_buffer('pos_table3', self._get_sinusoid_encoding_table(n_position, d_hid))
+    def _get_sinusoid_encoding_table(self, n_position, d_hid):
+        ''' Sinusoid position encoding table '''
+
+        def get_position_angle_vec(position):
+            return [position / np.power(10000, 2 * (hid_j // 2) / d_hid) for hid_j in range(d_hid)]
+
+        sinusoid_table = np.array([get_position_angle_vec(pos_i) for pos_i in range(n_position)])
+        sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
+        sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
+
+        return torch.FloatTensor(sinusoid_table).unsqueeze(0)
+
+    def forward(self,x,n_person):
+        p=self.pos_table[:,:x.size(1)].clone().detach()
+        return x + p
+
+    def forward2(self, x, n_person):
+        # if x.shape[1]==135:
+        #     p=self.pos_table3[:, :int(x.shape[1]/n_person)].clone().detach()
+        #     p=p.repeat(1,n_person,1)
+        # else:
+        p=self.pos_table2[:, :int(x.shape[2])].clone().detach()
+        p=p.repeat(n_person,1,1)
+        p=p.unsqueeze(0)
+        return x + p
+
+class Encoder(nn.Module):
+    ''' A encoder model with self attention mechanism. '''
+
+    def __init__(
+            self, d_word_vec, n_layers, n_head, d_k, d_v,
+            d_model, d_inner, pad_idx, dropout=0.1, n_position=200, device='cuda'):
+
+        super().__init__()
+        self.position_embeddings = nn.Embedding(n_position, d_model)
+        #self.src_word_emb = nn.Embedding(n_src_vocab, d_word_vec, padding_idx=pad_idx)
+        # self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position)
+        self.dropout = nn.Dropout(p=dropout)
+        self.layer_stack = nn.ModuleList([
+            EncoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            for _ in range(n_layers)])
+
+        self.crasslayer_stack = nn.ModuleList([
+            CrassLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            for _ in range(n_layers)])
+
+        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+        self.device=device
+    def forward(self, src_seq,n_person, src_mask, return_attns=False, global_feature=False,keydrop=False,spe_msk=False,spe_att=1):
+        layer = 0
+        enc_slf_attn_list = []
+        # -- Forward
+        #src_seq = self.layer_norm(src_seq)
+
+
+        if global_feature:
+            # enc_output = self.dropout(self.position_enc.forward2(src_seq,n_person))
+            enc_input_q = src_seq[:, 0, :, :]  # (32,1,14,128)
+            enc_input_v = src_seq[:, 1, :, :]  # (32,1,14,128)
+            mask_ratio = [0.3, 0.2, 0.1]
+            for enc_layer in self.crasslayer_stack:
+                enc_input_q, enc_slf_attn = enc_layer(enc_input_q,enc_input_v, slf_attn_mask=src_mask, keydrop=keydrop,mask_ratio=mask_ratio[layer],spe_msk=spe_msk,spe_att=spe_att)
+
+                if layer == 3:
+                    layer = 0
+                else:
+                    layer = layer + 1
+
+                enc_slf_attn_list += [enc_slf_attn] if return_attns else []
+
+        else:
+            # enc_output = self.dropout(self.position_enc(src_seq,n_person))
+            mask_ratio = [0.5, 0.3, 0]
+            for enc_layer in self.layer_stack:
+
+                src_seq, enc_slf_attn = enc_layer(src_seq, slf_attn_mask=src_mask, keydrop=keydrop,mask_ratio=mask_ratio[layer])
+
+                if layer == 3:
+                    layer = 0
+                else:
+                    layer = layer + 1
+
+                #enc_slf_attn_list += [enc_slf_attn] if return_attns else []
+            enc_input_q = src_seq
+
+        return enc_input_q,enc_slf_attn
+
+
+class Decoder(nn.Module):
+
+    def __init__(
+            self, d_word_vec, n_layers, n_head, d_k, d_v,
+            d_model, d_inner, pad_idx, n_position=200, dropout=0.1,device='cuda'):
+
+        super().__init__()
+
+        #self.trg_word_emb = nn.Embedding(n_trg_vocab, d_word_vec, padding_idx=pad_idx)
+        self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position)
+        self.dropout = nn.Dropout(p=dropout)
+        self.layer_stack = nn.ModuleList([
+            DecoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            for _ in range(n_layers)])
+        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+        self.device=device
+
+    def forward(self, trg_seq, trg_mask, enc_output, src_mask, return_attns=False, keydrop = False,spe_msk=False,spe_att=1):
+        layer = 0
+        dec_slf_attn_list, dec_enc_attn_list = [], []
+
+        dec_output = (trg_seq)
+        mask_ratio = [0.7, 0.4, 0.1]   # 新改
+        for dec_layer in self.layer_stack:
+            dec_output, dec_slf_attn, dec_enc_attn = dec_layer(dec_output, enc_output, slf_attn_mask=trg_mask, dec_enc_attn_mask=src_mask,
+                                                               keydrop=keydrop,mask_ratio=mask_ratio[layer],spe_msk=spe_msk,spe_att=spe_att)
+            if layer == 3:
+                layer = 0
+            else:
+                layer = layer+1
+
+            dec_slf_attn_list += [dec_slf_attn] if return_attns else []
+            dec_enc_attn_list += [dec_enc_attn] if return_attns else []
+
+        if return_attns:
+            return dec_output, dec_slf_attn_list, dec_enc_attn_list
+        return dec_output, dec_enc_attn_list
+
+
+
+class Transformer(nn.Module):
+    ''' A sequence to sequence model with attention mechanism. '''
+
+    def __init__(
+            self, src_pad_idx=1, trg_pad_idx=1,
+            d_word_vec=64, d_model=64, d_inner=512,
+            n_layers=3, n_head=8, d_k=32, d_v=32, dropout=0.2, n_position=100,
+            device='cuda'):
+
+        super().__init__()
+
+        self.device = device
+
+        self.d_model=d_model
+        self.src_pad_idx, self.trg_pad_idx = src_pad_idx, trg_pad_idx
+
+        self.proj = nn.Linear(45,d_model) # 45: 15jointsx3
+        self.proj2 = nn.Linear(45,d_model)
+
+
+        self.l1=nn.Linear(d_model, d_model*8)
+        self.l2=nn.Linear(d_model*8, d_model*10)
+        self.proj_inverse = nn.Linear(d_model, 45)
+
+        self.dropout = nn.Dropout(p=dropout)
+
+
+
+        self.cross_enc =  Encoder(
+            n_position=n_position,
+            d_word_vec=d_word_vec, d_model=d_model, d_inner=d_inner,
+            n_layers=n_layers, n_head=n_head, d_k=d_k, d_v=d_v,
+            pad_idx=src_pad_idx, dropout=dropout, device=self.device)
+        self.cross_enc_2 =  Encoder(
+            n_position=n_position,
+            d_word_vec=d_word_vec, d_model=d_model, d_inner=d_inner,
+            n_layers=n_layers, n_head=n_head, d_k=d_k, d_v=d_v,
+            pad_idx=src_pad_idx, dropout=dropout, device=self.device)
+        self.cross_enc_3 =  Encoder(
+            n_position=n_position,
+            d_word_vec=d_word_vec, d_model=d_model, d_inner=d_inner,
+            n_layers=n_layers, n_head=n_head, d_k=d_k, d_v=d_v,
+            pad_idx=src_pad_idx, dropout=dropout, device=self.device)
+
+        self.position_enc = PositionalEncoding(d_word_vec, n_position=n_position)
+
+        self.decoder = Decoder(
+            n_position=n_position,
+            d_word_vec=d_word_vec, d_model=d_model, d_inner=d_inner,
+            n_layers=n_layers, n_head=n_head, d_k=d_k, d_v=d_v,
+            pad_idx=trg_pad_idx, dropout=dropout, device=self.device)
+
+        self.layer_norm = nn.LayerNorm(128)
+        self.act = nn.GELU()
+
+        self.local_gcn = GCN_Block(input_feature=49, hidden_feature=49, node_n=45, device=device)
+        self.TimesBlock = TimesNet(top_k=3, layer=1)
+
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+        assert d_model == d_word_vec, \
+        'To facilitate the residual connections, \
+         the dimensions of all module outputs shall be the same.'
+
+    def forward(self, src_seq, trg_seq, abs_seq):
+        '''
+        src_seq: local     (3B,49,45)
+        trg_seq: local     (3B,1 ,45)
+        abs_seq: global  (B,3,49,45)
+        '''
+        n_person = abs_seq.shape[1]
+
+        '''SPE'''
+        root_positions = abs_seq[:, :,0:1, :3]    # (32,p,15,45)  ->  (32,p,1,3)
+        root_positions = root_positions.reshape(-1, n_person, 3)   # (32,p,3)
+        # 计算欧式距离----# (32,p,p)
+        root_distances = torch.norm(root_positions[:, :, None, :] - root_positions[:, None, :, :], dim=-1)
+        root_distances = torch.exp(-root_distances)  #(B,P,P)
+
+        '''local'''
+        src_seq = src_seq.transpose(-2, -1)   # (96,45,49)
+        src_seq = self.local_gcn(src_seq)     # (96,45,49)
+        src_seq = src_seq.transpose(-2, -1)   # (96,49,45)
+
+        gcn_out = self.proj(src_seq)          # (96,49,128)
+        glo_input = self.TimesBlock(gcn_out)  # (96,49,128)
+        glo_input_ = glo_input.reshape(-1, n_person, 49, self.d_model)  # (32,3,49,128)
+
+        '''global'''
+        #scale_1
+        glo_input_1=glo_input_
+
+        person_list = []
+        for i in range(n_person):
+            cross_results = []
+            for j in range(n_person):
+
+                TT=glo_input_1.shape[2]
+                dist = root_distances[:, i, j]  # (B,1,1)
+                dist = dist.unsqueeze(1).repeat(1, 8).unsqueeze(2).repeat(1, 1, TT).unsqueeze(3).repeat(1, 1, 1,64)  # (32,8,49,64)
+
+                if i==j:
+                    person = glo_input_1[:, i, :, :]   # (B,49,128)
+                else:
+                    person = torch.cat([glo_input_1[:,i,:,:].unsqueeze(1),glo_input_1[:,j,:,:].unsqueeze(1)],dim=1)  # (B,2,49,128)
+                    person = self.dropout(self.position_enc.forward2(person, 2))
+                    person, *_= self.cross_enc(person, n_person=2, src_mask=None, global_feature=True, keydrop=True, spe_msk=True, spe_att=dist)  # (B,49,128)
+                cross_results.append(person)
+
+            cross_results = torch.cat(cross_results, dim=1) # (B,49*p,:)
+            cross_results = cross_results.unsqueeze(1)  # (B,:,49*p,:)
+            person_list.append(cross_results)
+
+        persons = torch.cat(person_list, dim=1) # (B,p,49*p,:)
+        B = persons.shape[0]
+        persons_1 = persons.reshape(B*n_person, -1, self.d_model)  # (B*P,T*P,128)-->(96,49*3,128)
+
+        #scale_2   (32, 3, 49, 128)
+        glo_input_2 = glo_input_1.unfold(2, 3, 3)
+        glo_input_2 = glo_input_2.mean(dim=4)
+
+        person_list = []
+        for i in range(n_person):
+            cross_results = []
+            for j in range(n_person):
+
+                TT=glo_input_2.shape[2]
+                dist = root_distances[:, i, j]  # (B,1,1)
+                dist = dist.unsqueeze(1).repeat(1, 8).unsqueeze(2).repeat(1, 1, TT).unsqueeze(3).repeat(1, 1, 1,64)  # (32,8,49,64)
+
+                if i==j:
+                    #person = glo_input_2[:, i, :, :]   # (B,49,128)
+                    person = torch.cat([glo_input_2[:, i, :, :].unsqueeze(1), glo_input_2[:, j, :, :].unsqueeze(1)],dim=1)  # (B,2,49,128)
+                    person = self.dropout(self.position_enc.forward2(person, 2))
+                    person, *_ = self.cross_enc_2(person, n_person=2, src_mask=None, global_feature=True, keydrop=True,spe_msk=True, spe_att=dist)  # (B,49,128)
+
+                else:
+                    person = torch.cat([glo_input_2[:,i,:,:].unsqueeze(1),glo_input_2[:,j,:,:].unsqueeze(1)],dim=1)  # (B,2,49,128)
+                    person = self.dropout(self.position_enc.forward2(person, 2))
+                    person, *_= self.cross_enc_2(person, n_person=2, src_mask=None, global_feature=True, keydrop=True, spe_msk=True, spe_att=dist)  # (B,49,128)
+                cross_results.append(person)
+
+            cross_results = torch.cat(cross_results, dim=1) # (B,49*p,:)
+            cross_results = cross_results.unsqueeze(1)      # (B,:,49*p,:)
+            person_list.append(cross_results)
+
+        persons = torch.cat(person_list, dim=1) # (B,p,49*p,:)
+        B = persons.shape[0]
+        persons_2 = persons.reshape(B*n_person, -1, self.d_model)  # (B*P,T*P,128)-->(96,49*3,128)
+
+        persons_2 =persons_2.repeat(1, persons_1.shape[1] // persons_2.shape[1], 1)
+        persons_2 = persons_2[:, :persons_1.shape[1], :]
+
+        persons_1[:, :48*n_person, :] =  persons_2 + persons_1[:, :48*n_person, :]
+
+        '''decoder'''
+        last_seq_ = self.proj2(trg_seq)  # (96,1,128)
+
+        dec_output, dec_attention,*_  = self.decoder(last_seq_, None,persons_1, None)  # (96,1,128)
+        dec_output = self.l1(dec_output)   # (96,1,128*8)
+        dec_output = self.act(dec_output)  # 新加
+        dec_output = self.l2(dec_output)   # (96,1,128*25)
+        dec_output = self.act(dec_output)  # 新加
+        dec_output = dec_output.view(dec_output.shape[0], 10, self.d_model)   # (96,25,128)
+        dec_output = self.proj_inverse(dec_output)  # (96,25,45)
+
+        return dec_output
+
+
+
