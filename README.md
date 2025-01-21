@@ -18,7 +18,10 @@ Recent advancements in multi-person motion prediction have significantly improve
 
 
 ## Training
-`python train.py`
+`python Train_IME.py`
+
+## Evaluation
+`python Test_IME.py`
 
 
 
