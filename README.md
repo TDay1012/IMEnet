@@ -7,8 +7,8 @@ Recent advancements in multi-person motion prediction have significantly improve
 
 
 ## Prepare Data
-[Go to Google](https://www.google.com)
-[The dataset can be downloaded from]((https://onedrive.live.com/?redeem=aHR0cHM6Ly8xZHJ2Lm1zL2YvcyFBa0gyTDdKNHlqNlhnU2RkandwM1F3UGUwaUZCP2U9UllKS1pt&id=973ECA78B22FF641%21167&cid=973ECA78B22FF641))
+[Go to Google]([https://www.google.com](https://onedrive.live.com/?redeem=aHR0cHM6Ly8xZHJ2Lm1zL2YvcyFBa0gyTDdKNHlqNlhnU2RkandwM1F3UGUwaUZCP2U9UllKS1pt&id=973ECA78B22FF641%21167&cid=973ECA78B22FF641))
+[The dataset can be downloaded from
  
 ```
 your_project_folder/
