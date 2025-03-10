@@ -1,0 +1,59 @@
+''' Define the Layers '''
+import torch.nn as nn
+import torch
+from IMEnet.IMEnet.SubLayers import MultiHeadAttention, PositionwiseFeedForward,Cross_MultiHeadAttention
+
+
+__author__ = "Yu-Hsiang Huang"
+
+#编码层
+class EncoderLayer(nn.Module):
+    ''' Compose with two layers '''
+
+    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1):
+        super(EncoderLayer, self).__init__()
+        self.slf_attn = MultiHeadAttention(n_head, d_model, d_k, d_v, dropout=dropout)
+        self.pos_ffn = PositionwiseFeedForward(d_model, d_inner, dropout=dropout)
+
+    def forward(self, enc_input, slf_attn_mask=None,keydrop=False,mask_ratio=0.4):
+        enc_output, enc_slf_attn = self.slf_attn(
+            enc_input, enc_input, enc_input, mask=slf_attn_mask,keydrop=keydrop,mask_ratio=mask_ratio)
+        enc_output = self.pos_ffn(enc_output)
+        return enc_output, enc_slf_attn
+
+#译码层
+class CrassLayer(nn.Module):
+    ''' Compose with two layers '''
+
+    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1):
+        super(CrassLayer, self).__init__()
+        self.slf_attn = Cross_MultiHeadAttention(n_head, d_model, d_k, d_v, dropout=dropout)
+        self.pos_ffn = PositionwiseFeedForward(d_model, d_inner, dropout=dropout)
+
+    def forward(self, enc_input_q,enc_input_v, slf_attn_mask=None,keydrop=False,mask_ratio=0.4,spe_msk=False,spe_att=1):
+
+
+        enc_input_q, enc_slf_attn = self.slf_attn(enc_input_q, enc_input_v, enc_input_v, mask=slf_attn_mask, keydrop=keydrop, mask_ratio=mask_ratio,spe_msk=spe_msk,spe_att=spe_att)
+        enc_input_q = self.pos_ffn(enc_input_q)   # 新改
+        return enc_input_q,enc_slf_attn
+
+
+class DecoderLayer(nn.Module):
+    ''' Compose with three layers '''
+
+    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1):
+        super(DecoderLayer, self).__init__()
+        self.slf_attn = MultiHeadAttention(n_head, d_model, d_k, d_v, dropout=dropout)
+        self.enc_attn = MultiHeadAttention(n_head, d_model, d_k, d_v, dropout=dropout)
+        self.pos_ffn = PositionwiseFeedForward(d_model, d_inner, dropout=dropout)
+
+    def forward(
+            self, dec_input, enc_output,
+            slf_attn_mask=None, dec_enc_attn_mask=None,keydrop=False,mask_ratio=0.4,spe_msk=False,spe_att=1):
+        #dec_output, dec_slf_attn = self.slf_attn(
+        #    dec_input, dec_input, dec_input, mask=slf_attn_mask)
+        dec_output, dec_enc_attn = self.enc_attn(
+            dec_input, enc_output, enc_output, mask=dec_enc_attn_mask,keydrop=keydrop,mask_ratio=mask_ratio,spe_msk=spe_msk,spe_att=spe_att)
+        dec_output = self.pos_ffn(dec_output)
+        return dec_output, None, dec_enc_attn # dec_slf_attn, dec_enc_attn
+
