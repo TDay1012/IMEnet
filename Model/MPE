@@ -1,0 +1,104 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch
+from IMEnet.IMEnet.Conv_Blocks import Inception_Block_V1
+import numpy as np
+import torch_dct as dct
+def FFT_for_Period(x, k=2):
+    # [B, T, C]
+    xf = torch.fft.rfft(x, dim=1)
+    # find period by amplitudes
+    frequency_list = abs(xf).mean(0).mean(-1)
+    frequency_list[0] = 0
+    _, top_list = torch.topk(frequency_list, k)
+    top_list = top_list.detach().cpu().numpy()
+    period = x.shape[1] // top_list
+    return period, abs(xf).mean(-1)[:, top_list]
+
+# 按照不同周期长度，对数据截取堆叠成2D
+class TimesNet(nn.Module):
+    def __init__(self, top_k, layer):
+        super(TimesNet, self).__init__()
+        self.k = top_k
+        self.layer = layer
+        self.conv = nn.Sequential(
+            Inception_Block_V1(in_channels=128, out_channels=128, num_kernels=5),
+            nn.GELU(),
+            Inception_Block_V1(in_channels=128, out_channels=128, num_kernels=5)
+        )
+        self.dropout = nn.Dropout(0.3)
+        self.layer_norm = nn.LayerNorm(45)
+
+
+    def forward(self, x):
+        tn_intput = x
+
+        layer = self.layer    # Block
+        for i in range(layer):
+            top_k = self.k
+            period_list, period_weight = FFT_for_Period(dct.idct(tn_intput), k=top_k)
+            x = tn_intput
+            B, T, N = x.size()
+            tn_intput_ = []
+            for j in range(top_k):
+                # 获取第i个频率对应的周期长度
+                seq_len = T
+                period = period_list[j]
+                # padding
+                if seq_len % period != 0:
+                    length = ((seq_len // period) + 1) * period
+                    padding = torch.zeros([x.shape[0], (length - seq_len), x.shape[2]]).to(x.device)
+                    out = torch.cat([x, padding], dim=1)
+                else:
+                    length = seq_len
+                    out = x
+                # reshape：1D -> 2D
+                out = out.reshape(B, length // period, period, N).permute(0, 3, 1, 2).contiguous()
+                # 2D conv
+                out = self.conv(out)  # (96,128,1,49)
+                # reshape：2D -> 1D
+
+                out = out.permute(0, 2, 3, 1).reshape(B, -1, N)
+                res = out[:, :seq_len, :]  # (96,59,128)
+                tn_intput_.append(res)
+            tn_intput = torch.stack((tn_intput_), dim=-1)
+
+            # adaptive aggregation
+
+            period_weight = F.softmax(period_weight, dim=1)
+            period_weight = period_weight.unsqueeze(1).unsqueeze(1).repeat(1, T, N, 1)
+            tn_intput = torch.sum(tn_intput * period_weight, -1)
+            tn_intput = self.dropout(tn_intput)
+            tn_intput = tn_intput+x
+
+        tn_output = tn_intput
+
+        return tn_output
+
+class Time_Covn2D_Block(nn.Module):
+    def __init__(self):
+        super(Time_Covn2D_Block, self).__init__()
+        self.dropout = nn.Dropout(0.2)
+        self.layer_norm = nn.LayerNorm(45)
+
+        self.conv2d_1 = nn.Conv2d(in_channels=128, out_channels=512, kernel_size=(3, 1), padding=1)
+        self.conv2d_2 = nn.Conv2d(in_channels=512, out_channels=128, kernel_size=(3, 1), padding=0)
+        self.GELU = nn.GELU()
+
+    def forward(self, x, n_person):
+
+        tn_intput = x   #(96,49*3,128)
+        B, T, N = tn_intput.size()
+        seq_len = T // n_person
+
+        # reshape：1D -> 2D
+        tn_intput = tn_intput.reshape(B, n_person, seq_len, N).permute(0, 3, 1, 2).contiguous()  # (96,3,49,128)->(96,128,3,49)
+        # 2D con
+        out = self.conv2d_1(tn_intput)
+        out = self.GELU(out)
+        out = self.conv2d_2(out)
+        # reshape：2D -> 1D
+        tn_output = out.permute(0, 2, 3, 1).reshape(B, -1, N)  # (96,1,49,128)
+
+        return tn_output # (96,T/P,128)
