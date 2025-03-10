@@ -1,0 +1,34 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+# 缩放点积注意器 -- self_attention
+
+
+class ScaledDotProductAttention(nn.Module):
+    ''' Scaled Dot-Product Attention '''
+
+    def __init__(self, temperature, attn_dropout=0.1):
+        super().__init__()
+        self.temperature = temperature
+        self.dropout = nn.Dropout(attn_dropout)
+
+    def forward(self, q, k, v, mask=None, keydrop=False, mask_ratio=0.4,spe_msk=False,spe_att=1):
+
+        if spe_msk:
+            k = torch.mul(k,spe_att)
+
+        attn = (q * (q.shape[1] ** -0.5)) @ k.transpose(-2, -1)
+
+        if keydrop:
+            m_r = torch.ones_like(attn) * mask_ratio
+            attn = attn + torch.bernoulli(m_r) * -1e12
+            attn = F.softmax(attn, dim=-1)
+        else:
+            attn = self.dropout(F.softmax(attn, dim=-1))
+
+        if mask is not None:
+            attn = attn.masked_fill(mask == 0, -1e9)
+
+        output = attn @ v  # 计算矩阵乘积
+
+        return output, attn
