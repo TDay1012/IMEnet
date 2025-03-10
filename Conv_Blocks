@@ -1,0 +1,116 @@
+import torch
+import torch.nn as nn
+
+class Inception_Block_V1(nn.Module):
+    def __init__(self, in_channels, out_channels, num_kernels=6, init_weight=True):
+        super(Inception_Block_V1, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_kernels = num_kernels
+        kernels = []
+        for i in range(self.num_kernels):
+            kernels.append(nn.Conv2d(in_channels, out_channels, kernel_size=2 * i + 1, padding=i))
+        self.kernels = nn.ModuleList(kernels)
+        if init_weight:
+            self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        res_list = []
+        for i in range(self.num_kernels):
+            # torch.backends.cudnn.enabled = False
+            res_list.append(self.kernels[i](x))
+        res = torch.stack(res_list, dim=-1).mean(-1)
+        # torch.backends.cudnn.enabled = True
+        return res
+
+'''
+def gumbel_softmax(logits, tau=1, hard=False, eps=1e-10, dim=-1):
+    gumbels = (-torch.empty_like(logits, memory_format=torch.legacy_contiguous_format).exponential_().log())  # ~Gumbel(0,1)
+    gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    y_soft = gumbels.softmax(dim)
+
+    if hard:
+        index = y_soft.max(dim, keepdim=True)[1]
+        y_hard = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format).scatter_(dim, index, 1.0)
+        ret = y_hard - y_soft.detach() + y_soft
+    else:
+        ret = y_soft
+    return ret
+
+
+class Inception_Block_V1(nn.Module):
+    def __init__(self, in_channels, out_channels, num_kernels=6, init_weight=True):
+        super(Inception_Block_V1, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_kernels = num_kernels
+        kernels = []
+        for i in range(self.num_kernels):
+            kernels.append(nn.Conv2d(in_channels, out_channels, kernel_size=2 * i + 1, padding=i))
+        self.kernels = nn.ModuleList(kernels)
+        if init_weight:
+            self._initialize_weights()
+
+        self.lock_1 = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(in_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, self.num_kernels)
+        )
+        self.lock_2 = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(in_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, self.num_kernels)
+        )
+        self.lock_3 = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(in_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, self.num_kernels)
+        )
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        res_list = []
+        sor_1 = self.lock_1(x)
+        sor_2 = self.lock_2(x)
+        sor_3 = self.lock_3(x)
+
+        lock1 = gumbel_softmax(sor_1, tau=1, hard=True).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+        lock2 = gumbel_softmax(sor_2, tau=1, hard=True).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+        lock3 = gumbel_softmax(sor_3, tau=1, hard=True).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+
+
+        for i in range(self.num_kernels):
+            # torch.backends.cudnn.enabled = False
+            res_list.append(self.kernels[i](x).unsqueeze(1))
+
+        sele_conv = torch.cat(res_list, dim=1)
+        #a = sele_conv * lock1
+        sele_conv1 = torch.sum(sele_conv * lock1, dim=1, keepdim=True).squeeze(1)
+        sele_conv2 = torch.sum(sele_conv * lock2, dim=1, keepdim=True).squeeze(1)
+        sele_conv3 = torch.sum(sele_conv * lock3, dim=1, keepdim=True).squeeze(1)
+
+        res = torch.stack([sele_conv1,sele_conv2,sele_conv3], dim=-1).mean(-1)
+        # torch.backends.cudnn.enabled = True
+        return res
+'''
+
+
